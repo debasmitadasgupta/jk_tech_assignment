@@ -1,0 +1,46 @@
+image: robertd/alpine-aws-cdk:2.99.0
+
+pipelines:
+  custom:
+    fastapi:
+      - variables:
+          - name: app  
+            default: MicroserviceStack
+            allowed-values:         # optionally restrict variable values
+              - MicroserviceStack
+          
+      - step:
+          name: fastapi-docker-build
+          trigger: automatic
+          services:
+            - docker
+          caches:
+            - pip
+          script:
+            - IMAGE="${AWS_ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/fastapi-microservice"
+            - VERSION=$(date +"%m-%d-%y-%M")
+            - TAG=fastapi-${BITBUCKET_BRANCH}-${VERSION}
+            - aws configure set aws_access_key_id "${AWS_KEY}"
+            - aws configure set aws_secret_access_key "${AWS_SECRET}"
+            - aws configure set region "${REGION}"
+            - eval aws --region "${REGION}" ecr get-login-password | docker login --password-stdin --username AWS "${AWS_ACCOUNT}".dkr.ecr."${REGION}".amazonaws.com
+            - docker build  -f Dockerfile --no-cache -t $IMAGE:$TAG .
+            - docker push $IMAGE:$TAG
+            - aws ssm put-parameter --name "/python/cdk/fastapi/dev" --value "$IMAGE:$TAG" --type "String" --overwrite
+      - step:
+          trigger: automatic
+          name: deploy-fastapi
+          script:            
+            - apk update
+            - apk add --no-cache aws-cli curl
+            - curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+            - chmod +x ./kubectl
+            - mv ./kubectl /usr/local/bin/kubectl
+            - aws configure set aws_access_key_id "${AWS_KEY}"
+            - aws configure set aws_secret_access_key "${AWS_SECRET}"
+            - aws configure set region "${REGION}"
+            - aws eks update-kubeconfig --region "${REGION}" --name "${CLUSTER}"
+            - FASTAPI_IMAGE=$(aws ssm get-parameter --name "/python/cdk/fastapi/dev" --query Parameter.Value --output text)
+            - sed -i "s|<IMAGE_PLACEHOLDER>|$FASTAPI_IMAGE|g" k8s/deployment.yaml
+            - kubectl apply -f k8s/deployment.yaml --validate=false
+            - kubectl apply -f k8s/service.yaml --validate=false
